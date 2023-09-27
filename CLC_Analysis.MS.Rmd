@@ -1,0 +1,2691 @@
+---
+title: "Data Analysis & Figure Generation"
+subtitle:    | 
+    | "Manter et al. 2024. Unveiling hidden errors in soil microbial community sequencing: 
+    | A case for reference soils and improved diagnostics. Nature Methods"
+
+author: Daniel Manter
+affiliation: USDA-ARS
+email: daniel.manter@usda.gov
+
+date: "`r format(Sys.time(), '%m/%d/%y')`"
+output: bookdown::html_document2
+---
+
+
+## Project Description
+This analysis is for the USDA-ARS Cross-laboratory Comparison (CLC) Project. 
+Soil samples from two sites (ARDEC and Pendleton) were sequenced using the 
+Oxford Nanopore minION in different laboratories. Code provided is for all
+data analysis and figure generation.
+
+
+## Project directory structure (\*denotes a required input file/folder)
+```
+        +-- proj_dir*
+        |   +-- CLC_Analysis.MS.Rmd*          <-- (this file)
+        |   +-- myFunctions.R*                <-- R script with custom functions
+        |   +-- P.count.RDS*                  <-- Project phyloseq object
+        |   +-- EMU.phylip.dist.RDS*          <-- <u>final</u> distance matrix
+```
+
+
+## Load required packages
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+library(devtools)
+library(dplyr)
+library(emmeans)
+library(effectsize)
+library(ggnewscale)
+library(ggplot2)
+library(ggpubr)
+library(ggtext)
+library(ggthemes)
+library(ggtree)
+library(ggtreeExtra)
+library(ggVennDiagram)
+library(microbiomeMarker)
+library(MicEco)
+library(phyloseq)
+library(reticulate)
+library(RColorBrewer)
+library(readxl)
+library(scales)
+library(tidyverse)
+library(vegan)
+library(viridis)
+source("myFunctions.R")
+```
+
+
+## Figure 1b & 1c - Species Richness - Soils
+```{r}
+options(es.use_symbols = TRUE)
+
+# import data file
+P.count <- readRDS('P.count.RDS')
+
+# select only soil samples
+P.count <- subset_samples(P.count, Type == 'Soil')
+
+# remove test samples
+P.count <- subset_samples(P.count, QC != 'Test')
+
+# remove any blank taxa
+P.count = filter_taxa(P.count, function(x) sum(x) > 0, TRUE)
+
+# richness rarefied
+P.rare <- rarefy_even_depth(P.count, sample.size=12000, rngseed=TRUE)
+rich.rare <- plot_richness(P.rare, x="Library", measures=c('Observed'))
+gDF.rare <- rich.rare$data
+gDF.rare$Library <- factor(gDF.rare$Library, levels=c('Seq', 'PCR/Seq', 'Ext/PCR/Seq'))
+gDF.rare$run_name <- sample_data(P.count)$run_name
+
+# Plot richness by site and library
+p <- ggplot(gDF.rare, aes(x=Code.name, y=value, fill=Site)) +
+  geom_boxplot() +
+  scale_y_continuous(labels = function(x) format(x, big.mark = ",",
+                                                 scientific = FALSE)) +
+  scale_fill_manual(values=colors) +
+  facet_grid(. ~ Library) +
+  labs(y='Species Richness', x='') +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1)) +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(2, "in"), width=unit(1.75, "in"))
+ggsave(p, file='figures/Figure.1b.png', dpi=300, height=3.5, width=7, units='in')
+
+# fit Michaelis-Menton with all data
+nlmod <- nls(value ~ s*Reads_ftc/(F+Reads_ftc), start = c(F=2000, s=2000), data = gDF.rare) 
+nlmod
+
+# fit Michaelis-Menton for each site
+mods <- gDF.rare %>% 
+  group_by(Site) %>%
+  do(model = summary(nls(value ~ s*Reads_ftc/(F+Reads_ftc), 
+                  data = ., 
+                  start = c(F=125821, s=2189)))) # get values from initial nlmod
+
+# Iterate through nls fits and print results
+modFit <- data.frame(F=numeric(), Site=character(), s=numeric(), SE_F=numeric(), 
+                     SE_s=numeric(), sigma=numeric())
+for (i in 1:nrow(mods)) {
+  #Library = as.vector(mods$Library[[i]])
+  Site = as.vector(mods$Site[[i]])
+  F = as.vector(format(round(mods$model[[i]]$parameters[[1]],0),big.mark=","))
+  s = as.vector(format(round(mods$model[[i]]$parameters[[2]],0),big.mark=","))
+  SE_F = as.vector(format(round(mods$model[[i]]$parameters[1,2],0),big.mark=","))
+  SE_s = as.vector(format(round(mods$model[[i]]$parameters[2,2],0),big.mark=","))
+  sigma = as.vector(round(mods$model[[i]]$sigma,1))
+  row = c(Site, F, s, SE_F, SE_s, sigma)
+  modFit[nrow(modFit)+1,] = row
+}
+modFit$eqn <- paste0('y=', modFit$s, '\u00B7', 'x/(', modFit$F, '+ x)\nRSE=', modFit$sigma)
+modFit
+
+# Plot richness vs number of reads
+colors <- c(paletteer::paletteer_d("ggthemes::Superfishel_Stone", 10))
+p <- ggplot(gDF.rare, aes(x=Reads_ftc, y=value, fill=Code.name, shape=Site)) +
+  geom_point(size=4, color='black') +
+  scale_x_continuous(labels = function(x) format(x, big.mark = ",",
+                                                 scientific = FALSE)) +
+  scale_y_continuous(labels = function(x) format(x, big.mark = ",",
+                                                 scientific = FALSE)) +
+  scale_fill_manual(values=colors) +
+  scale_shape_manual(values=c(21,22)) +
+  guides(fill = guide_legend(
+    override.aes=list(shape = rep(21, 7)))) +
+  geom_smooth(aes(group=Site, linetype=Site), method="nls", formula = 'y~s*x/(F+x)', 
+              method.args=list(start = c(F=125160, s=2181)), 
+              se=FALSE, color='black', show.legend=NULL) +
+  scale_linetype_manual(values=c(1,5)) +
+  labs(y='Species Richness', x='Sequence Reads', fill='Lab') +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1),
+        legend.spacing.y = unit(0.02, "cm")) +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(2, "in"), width=unit(2, "in"))
+ggsave(p, file='figures/Figure.1C_left.png', dpi=300, height=3.5, width=3.5, units='in')
+
+# fit Lineweaver-Burke Plot
+gDF.rare$y <- 1/gDF.rare$value
+gDF.rare$x <- 1/gDF.rare$Reads_ftc
+res <- lm(y ~ Code.name + Code.name*x, data=gDF.rare)
+summary(res)
+
+# Plot richness vs number of reads
+p <- ggplot(gDF.rare, aes(x=x, y=y, fill=Code.name, shape=Site)) +
+  geom_point(size=4, color='black') +
+  scale_fill_manual(values=colors) +
+  scale_color_manual(values=colors) +
+  scale_shape_manual(values=c(21,22)) +
+  guides(fill = guide_legend(
+    override.aes=list(shape = rep(21, 7)))) +
+  geom_smooth(aes(color=Code.name, group=Code.name), lwd=1.5,
+              method="lm", formula = 'y~x', se=FALSE,
+              show.legend=NULL) +
+  labs(y='1 / Species Richness', x='1 / Sequence Reads', fill='Lab', color='Lab') +
+  scale_linetype_manual(values=c(1,5)) +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1),
+        legend.spacing.y = unit(0.01, "cm")) +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(2, "in"), width=unit(2, "in"))
+ggsave(p, file='figures/Figure.1C_right.png', dpi=300, height=3.5, width=3.5, units='in')
+
+```
+
+
+## Figure 2a - Phyla Relative Abundances - Soils
+```{r}
+myRank <- 'phylum'
+
+# import data file
+P.count <- readRDS('P.count.RDS')
+
+# select only soil samples
+P.count <- subset_samples(P.count, Type == 'Soil')
+
+# remove test samples
+P.count <- subset_samples(P.count, QC != 'Test')
+
+# remove any blank taxa
+P.count = filter_taxa(P.count, function(x) sum(x) > 0, TRUE)
+
+# convert to relative abundance
+P.rel <- transform_sample_counts(P.count, function(x) x / sum(x))
+
+# pool by phyla
+P.glom <- phyloseq::tax_glom(P.rel, taxrank=myRank)
+
+# get top 10 taxa
+TopNOTUs = names(sort(taxa_sums(P.glom), TRUE)[1:10])
+P.10 = prune_taxa(TopNOTUs, P.glom)
+
+# exctract all data from phyloseq object
+d <- psmelt(P.10)
+d$Site <- factor(d$Site, levels=c('ARDEC', 'Pendleton'))
+d$Library <- factor(d$Library, levels=c('Seq', 'PCR/Seq', 'Ext/PCR/Seq'))
+d$Code.name <- factor(d$Code.name)
+
+# rename points by Site/plot for legend and coloring
+d$sample <- as.character(interaction(d$Site, d$Plot))
+d[d$sample == 'ExtH2O.<NA>','sample'] <- 'ExtH2O'
+d[d$sample == 'ARDEC.85E','sample'] <- 'ARDEC.Plot1'
+d[d$sample == 'ARDEC.86E','sample'] <- 'ARDEC.Plot2'
+d[d$sample == 'ARDEC.88C','sample'] <- 'ARDEC.Plot3'
+d[d$sample == 'ARDEC.89A','sample'] <- 'ARDEC.Plot4'
+d$sample <- factor(d$sample, levels=c('ARDEC.Plot1', 'ARDEC.Plot2','ARDEC.Plot3','ARDEC.Plot4',
+                                      'Pendleton.Plot1','Pendleton.Plot2','Pendleton.Plot3','Pendleton.Plot4'))
+
+# create graph
+colors <- paletteer::paletteer_d("ggthemes::Superfishel_Stone", 10)
+p <- ggplot(d, aes(x=Code.name, y=Abundance, fill=phylum)) +
+  geom_bar(position='stack', stat='summary', fun='mean') +
+  facet_grid(Site ~ Library, scales='free') +
+  #ggh4x::facet_nested(Library ~ Code.name, scales="free", space = "free") +
+  theme(strip.text.x=element_text(size=10, colour='blue', angle=0)) + 
+  theme(strip.text.y=element_text(size=10, colour='blue', angle=90)) + 
+  scale_fill_manual(values=colors) +
+  labs(x='', y='Relative Abundance', fill='') +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1)) +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(1.25, "in"), width=unit(1.45, "in"))
+ggsave(p, file='figures/Figure.2a.png', dpi=300, height=4, width=7, units='in')
+
+```
+
+
+## Figure 2b - ggTree
+```{r}
+# set desired rank
+myRank <- 'Family'
+
+# read in phyloseq object
+P.count <- readRDS('P.count.RDS')
+
+# select good soil samples
+P.soils <- subset_samples(P.count, Type == 'Soil')
+P.soils <- subset_samples(P.soils, QC != 'Test')
+
+# remove taxa with column sums = 0
+P.soils = filter_taxa(P.soils, function(x) sum(x, na.rm=T) > 0, TRUE)
+colnames(tax_table(P.soils)) <- c('Kingdom', 'Phylum', 'Class', 'Order', 'Family', 'Genus', 'Species')
+
+# normalize
+P.soils <- norm_cpm(P.soils)
+
+# get relevant phyla
+P.soils <- subset_taxa(P.soils, Phylum %in% c('Bacteroidetes', 'Actinobacteria', 
+                                              'Planctomycetes', 'Candidatus Saccharibacteria'))
+
+# pool at appropriate taxonomic level
+P.glom <- tax_glom(P.soils, myRank)
+P.glom <- prune_taxa(taxa_sums(P.glom) > 0, P.glom)
+
+# import phylip distance matrix and change names
+d <- readRDS('EMU.phylip.dist.RDS') # create distance matrix if necessary with "CLC_Analysis.NJ_Tree.Rmd"
+
+# subset dist matrix with final taxa in phyloseq object
+wanted <- intersect(names(d), taxa_names(P.glom))
+d.sub <- usedist::dist_subset(d, wanted)
+
+# create nj phylogenetic tree
+tre <- fastreeR::dist2tree(inputDist = d.sub)
+tre <- ape::read.tree(text = tre)
+
+# add tree to phyloseq object
+P.glom <- merge_phyloseq(P.glom, tree=tre)
+
+# merge all samples to create a tree with one observation per taxa
+P.merge <- merge_samples(P.glom, 'Type')
+P.merge <- prune_taxa(taxa_sums(P.merge) > 0, P.merge)
+
+# define color palette for tiplabels
+colors <- paletteer::paletteer_d("ggthemes::Superfishel_Stone", 10)
+
+# draw initial tree
+options(ignore.negative.edge=TRUE)
+p <- ggtree(P.merge, color='grey50') +
+     geom_tippoint(mapping=aes(color=Phylum), 
+                   size=2,
+                   show.legend=TRUE) +
+     scale_color_manual(values=colors) +
+     guides(color = guide_legend(
+       override.aes=list(size=5))) +
+    geom_tiplab(aes(label=Family), size=2.5, align=TRUE, offset=0.05, hjust=-0.01, family='serif') +
+    theme(plot.margin = margin(t = 0, r = 0, b = 50, l = 0, unit = "pt"))
+
+# convert counts to log2 CPM
+P.rel <- transform_sample_counts(P.glom, function(x) log10(x + 0.01))
+OTU <- otu_table(P.rel)
+OTU[OTU == -2] <- 0
+otu_table(P.rel) <- OTU
+
+# average each OTU by Library/Sequence Run  
+melt_all <- psmelt(P.rel) %>%
+  dplyr::select(OTU, val=Abundance, lname=Code.name, Library=Library) %>%
+  group_by(OTU, lname, Library) %>%
+  summarize(val = mean(val, na.rm=T))
+
+# fill any missing data with NA
+OTU <- unique(melt_all$OTU)
+lname <- unique(melt_all$lname)
+Library <- unique(melt_all$Library)
+melt_all <- expand.grid(OTU=OTU, lname=lname, Library=Library, stringsAsFactors=FALSE) %>%
+  left_join(melt_all, by=c("OTU", "lname", "Library"))
+
+# average each OTU by Library for the 2 primary labs only (i.e., assumed reference)
+sub <- melt_all %>%
+  filter(lname %in% c('Lab1', 'Lab4')) %>%
+  group_by(Library, OTU) %>%
+  summarize(mean = mean(val, na.rm=T))
+
+# calculate Log2FC between each lab and the ave primary lab 
+final <- melt_all %>%
+  left_join(sub, by=c('Library', 'OTU')) %>%
+  mutate(log2FC = val - mean) 
+
+# add relative abundance heatmaps to tree  
+q <- p + new_scale_fill() + new_scale_color() +
+         geom_fruit(data=final[final$Library=='Seq',], geom=geom_tile,
+                  mapping=aes(y=OTU, x=lname, fill=val, color=val),
+                  offset=0.8, pwidth = 0.5, color='grey50', 
+                  linewidth=0.001,
+                  axis.params=list(
+                         axis       = "x",
+                         text.size  = 2,
+                         text.angle = 90,
+                         family="serif",
+                         hjust = 1,
+                         vjust = 0)) +
+         geom_fruit(data=final[final$Library=='PCR/Seq',], geom=geom_tile,
+                  mapping=aes(y=OTU, x=lname, fill=val, color=val),
+                  offset=0.1, pwidth = 0.5, color='grey50',
+                  linewidth=0.001,
+                  axis.params=list(
+                         axis       = "x",
+                         text.size  = 2,
+                         text.angle = 90,
+                         family="serif",
+                         hjust = 1,
+                         vjust = 0)) +
+         geom_fruit(data=final[final$Library=='Ext/PCR/Seq',], geom=geom_tile,
+                  mapping=aes(y=OTU, x=lname, fill=val, color=val),
+                  offset=0.1, pwidth = 0.5, color='grey50',
+                  linewidth=0.001,
+                  axis.params=list(
+                         axis       = "x",
+                         text.size  = 2,
+                         text.angle = 90,
+                         family="serif",
+                         hjust = 1,
+                         vjust = 0)) +
+         scale_fill_gradient(low='white', high=muted('green'), 
+                             na.value='grey75', name='Log10 CPM', limits=c(0,5)) +
+         scale_color_gradient(low='white', high=muted('green'),  
+                              na.value='grey75', name='Log10 CPM', limits=c(0,5)) +
+         theme(legend.background=element_rect(fill=NA),
+               legend.title=element_text(size=10, vjust=2),
+               legend.text=element_text(size=8),
+               legend.spacing.y = unit(0.01, "cm"),
+               plot.margin = margin(t = 0, r = 0, b = 50, l = 0, unit = "pt")
+             ) +
+  coord_cartesian(clip="off") +
+  theme(text=element_text(size=9,  family="serif"))
+q
+ggsave('figures/Figure.2b.png', q, dpi=300, height=6, width=6, units='in')
+
+```
+
+
+## Figure 2c - Variability Rel Abund
+```{r}
+myRank <- 'Phylum'
+P.count <- readRDS('P.count.RDS')
+
+P.soils <- subset_samples(P.count, Type == 'Soil')
+P.soils <- subset_samples(P.soils, QC != 'Test')
+P.soils <- subset_samples(P.soils, Code.name != 'Lab3')
+
+# remove taxa with column sums = 0
+P.soils = filter_taxa(P.soils, function(x) sum(x, na.rm=T) > 0, TRUE)
+colnames(tax_table(P.soils)) <- c('Kingdom', 'Phylum', 'Class', 'Order', 'Family', 'Genus', 'Species')
+
+# normalize
+P.soils <- norm_cpm(P.soils)
+
+P.glom <- tax_glom(P.soils, myRank)
+P.glom <- prune_taxa(taxa_sums(P.glom) > 0, P.glom)
+
+# transform to log2
+P.rel <- transform_sample_counts(P.glom, function(x) log2(x + 0.25))
+OTU <- otu_table(P.rel)
+OTU[OTU == -2] <- 0
+otu_table(P.rel) <- OTU
+
+# average each OTU by Library/Sequence Run  
+melt_all <- psmelt(P.rel) %>%
+  dplyr::select(OTU, val=Abundance, lname=Code.name, Library=Library) %>%
+  group_by(OTU, lname, Library) %>%
+  summarize(val = mean(val, na.rm=T))
+
+# average each OTU by Library for the 2 primary labs only
+sub <- melt_all %>%
+  filter(lname %in% c('Lab1', 'Lab4')) %>%
+  group_by(Library, OTU) %>%
+  summarize(mean = mean(val, na.rm=T))
+
+# calculate Log2FC 
+final <- melt_all %>%
+  left_join(sub, by=c('Library', 'OTU')) %>%
+  mutate(log2FC = val - mean)
+  
+means <- final %>%
+  dplyr::group_by(Library, OTU) %>%
+  dplyr::summarize(Range = diff(range(log2FC, na.rm=F)),
+                   mean = mean(log2FC, na.rm=T),
+                   n = n())
+
+means$Library <- factor(means$Library, levels=c('Seq', 'PCR/Seq', 'Ext/PCR/Seq'))
+res <- aov(Range ~ Library + Error(OTU/Library), data=means)
+summary(res)
+
+emm <- emmeans::emmeans(res, "Library", data=means)
+pairs(emm, adjust='fdr')
+p <- plot(emm, comparisons=T, horizontal=F, adjust='fdr') +
+  labs(x='Rel. Abund. Variability', y='') +
+  xlim(0,6) +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=45, hjust=1)) +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(1.5, "in"), width=unit(1.5, "in"))
+ggsave(p, file='figures/Figure.2C_left.png', dpi=300, height=2.5, width=2.5, units='in')
+
+###
+myRank <- 'Class'
+P.count <- readRDS('P.count.RDS')
+
+P.soils <- subset_samples(P.count, Type == 'Soil')
+P.soils <- subset_samples(P.soils, QC != 'Test')
+P.soils <- subset_samples(P.soils, Code.name != 'Lab3')
+
+# remove taxa with column sums = 0
+P.soils = filter_taxa(P.soils, function(x) sum(x, na.rm=T) > 0, TRUE)
+colnames(tax_table(P.soils)) <- c('Kingdom', 'Phylum', 'Class', 'Order', 'Family', 'Genus', 'Species')
+
+# normalize
+P.soils <- norm_cpm(P.soils)
+
+P.glom <- tax_glom(P.soils, myRank)
+P.glom <- prune_taxa(taxa_sums(P.glom) > 0, P.glom)
+
+# transform to log2
+P.rel <- transform_sample_counts(P.glom, function(x) log2(x + 0.25))
+OTU <- otu_table(P.rel)
+OTU[OTU == -2] <- 0
+otu_table(P.rel) <- OTU
+
+# average each OTU by Library/Sequence Run  
+melt_all <- psmelt(P.rel) %>%
+  dplyr::select(OTU, val=Abundance, lname=Code.name, Library=Library) %>%
+  group_by(OTU, lname, Library) %>%
+  summarize(val = mean(val, na.rm=T))
+
+# average each OTU by Library for the 2 primary labs only
+sub <- melt_all %>%
+  filter(lname %in% c('Lab1', 'Lab4')) %>%
+  group_by(Library, OTU) %>%
+  summarize(mean = mean(val, na.rm=T))
+
+# calculate Log2FC 
+final <- melt_all %>%
+  left_join(sub, by=c('Library', 'OTU')) %>%
+  mutate(log2FC = val - mean)
+  
+means <- final %>%
+  dplyr::group_by(Library, OTU) %>%
+  dplyr::summarize(Range = diff(range(log2FC, na.rm=F)),
+                   mean = mean(log2FC, na.rm=T),
+                   n = n())
+
+means$Library <- factor(means$Library, levels=c('Seq', 'PCR/Seq', 'Ext/PCR/Seq'))
+res <- aov(Range ~ Library + Error(OTU/Library), data=means)
+summary(res)
+
+emm <- emmeans::emmeans(res, "Library", data=means)
+pairs(emm, adjust='fdr')
+p <- plot(emm, comparisons=T, horizontal=F, adjust='fdr') +
+  labs(x='Rel. Abund. Variability', y='') +
+  xlim(0,6) +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=45, hjust=1)) +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(1.5, "in"), width=unit(1.5, "in"))
+ggsave(p, file='figures/Figure.2C_center.png', dpi=300, height=2.5, width=2.5, units='in')
+
+###
+myRank <- 'Genus'
+P.count <- readRDS('P.count.RDS')
+
+P.soils <- subset_samples(P.count, Type == 'Soil')
+P.soils <- subset_samples(P.soils, QC != 'Test')
+P.soils <- subset_samples(P.soils, Code.name != 'Lab3')
+
+# remove taxa with column sums = 0
+P.soils = filter_taxa(P.soils, function(x) sum(x, na.rm=T) > 0, TRUE)
+colnames(tax_table(P.soils)) <- c('Kingdom', 'Phylum', 'Class', 'Order', 'Family', 'Genus', 'Species')
+
+# normalize
+P.soils <- norm_cpm(P.soils)
+
+P.glom <- tax_glom(P.soils, myRank)
+P.glom <- prune_taxa(taxa_sums(P.glom) > 0, P.glom)
+
+# transform to log2
+P.rel <- transform_sample_counts(P.glom, function(x) log2(x + 0.25))
+OTU <- otu_table(P.rel)
+OTU[OTU == -2] <- 0
+otu_table(P.rel) <- OTU
+
+# average each OTU by Library/Sequence Run  
+melt_all <- psmelt(P.rel) %>%
+  dplyr::select(OTU, val=Abundance, lname=Code.name, Library=Library) %>%
+  group_by(OTU, lname, Library) %>%
+  summarize(val = mean(val, na.rm=T))
+
+# average each OTU by Library for the 2 primary labs only
+sub <- melt_all %>%
+  filter(lname %in% c('Lab1', 'Lab4')) %>%
+  group_by(Library, OTU) %>%
+  summarize(mean = mean(val, na.rm=T))
+
+# calculate Log2FC 
+final <- melt_all %>%
+  left_join(sub, by=c('Library', 'OTU')) %>%
+  mutate(log2FC = val - mean)
+  
+means <- final %>%
+  dplyr::group_by(Library, OTU) %>%
+  dplyr::summarize(Range = diff(range(log2FC, na.rm=F)),
+                   mean = mean(log2FC, na.rm=T),
+                   n = n())
+
+means$Library <- factor(means$Library, levels=c('Seq', 'PCR/Seq', 'Ext/PCR/Seq'))
+res <- aov(Range ~ Library + Error(OTU/Library), data=means)
+summary(res)
+
+emm <- emmeans::emmeans(res, "Library", data=means)
+pairs(emm, adjust='fdr')
+p <- plot(emm, comparisons=T, horizontal=F, adjust='fdr') +
+  labs(x='Rel. Abund. Variability', y='') +
+  xlim(0,6) +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=45, hjust=1)) +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(1.5, "in"), width=unit(1.5, "in"))
+ggsave(p, file='figures/Figure.2C_right.png', dpi=300, height=2.5, width=2.5, units='in')
+
+```
+
+
+## Figure 3A - Similarities between replicate soil samples (within-lab)
+```{r}
+# import data file
+P.count <- readRDS('P.count.RDS')
+
+# select only soil samples
+P.count <- subset_samples(P.count, Type == 'Soil')
+
+# remove test samples
+P.count <- subset_samples(P.count, QC != 'Test')
+
+# pool at taxonomic level
+P.glom <- tax_glom(P.count, taxrank="genus")
+
+# remove taxa with column sums = 0
+P.glom = filter_taxa(P.glom, function(x) sum(x) > 0, TRUE)
+
+# create otu table
+data <- data.frame(t(otu_table(P.glom)))
+
+# Identify treatment variables
+d <- data.frame(sample_data(P.glom))
+d$Site <- factor(d$Site)
+d$Library <- factor(d$Library)
+d$Code.name <- factor(d$Code.name)
+
+### calculated distance matrix - Bray
+dist <- vegdist(decostand(data, 'hellinger'), method='bray')
+
+# convert distance matrix to column format
+dist.mat <- spaa::dist2list(dist)
+dist.mat$value <- 1 - dist.mat$value
+meta <- d[,c('Site', 'Plot', 'Rep', 'Library', 'Code.name')]
+meta$sample <- row.names(meta)
+dist.mat <- dist.mat %>%
+  left_join(meta, by=c('row'='sample'))
+dist.mat <- dist.mat %>%
+  left_join(meta, by=c('col'='sample'))
+
+# select
+dist.mat.sel <- dist.mat[as.numeric(dist.mat$row == dist.mat$col) == 0,]
+dist.mat.sel <- dist.mat.sel[as.numeric(dist.mat.sel$Code.name.x == dist.mat.sel$Code.name.y) == 1,]
+dist.mat.sel <- dist.mat.sel[as.numeric(dist.mat.sel$Library.x == dist.mat.sel$Library.y) == 1,]
+dist.mat.sel <- dist.mat.sel[as.numeric(dist.mat.sel$Site.x == dist.mat.sel$Site.y) == 1,]
+dist.mat.sel <- dist.mat.sel[as.numeric(dist.mat.sel$Plot.x == dist.mat.sel$Plot.y) == 1,]
+
+# create new dataframe with selected data
+bdisp <- dist.mat.sel[,c('Site.x', 'Plot.x', 'Library.x', 'Code.name.x', 'value')]
+names(bdisp) <- c('Site', 'Plot', 'Library', 'Lab', 'value')
+bdisp$sample <- interaction(bdisp$Site, bdisp$Plot)
+bdisp$Library <- factor(bdisp$Library, levels=c('Seq', 'PCR/Seq', 'Ext/PCR/Seq'))
+
+bdisp[bdisp$sample == 'ARDEC.85E','sample'] <- 'ARDEC.Plot1'
+bdisp[bdisp$sample == 'ARDEC.86E','sample'] <- 'ARDEC.Plot2'
+bdisp[bdisp$sample == 'ARDEC.88C','sample'] <- 'ARDEC.Plot3'
+bdisp[bdisp$sample == 'ARDEC.89A','sample'] <- 'ARDEC.Plot4'
+bdisp$sample <- factor(bdisp$sample, levels=c('ARDEC.Plot1', 'ARDEC.Plot2','ARDEC.Plot3','ARDEC.Plot4',
+                                        'Pendleton.Plot1','Pendleton.Plot2','Pendleton.Plot3','Pendleton.Plot4'))
+
+# calculate median, 10th and 95th percentiles for 'good' labs
+bdisp.sub <- bdisp[bdisp$Lab %in% c('Lab1', 'Lab2.b', 'Lab4', 'Lab6'),]
+tgc <- bdisp.sub %>%
+  group_by(Library) %>%
+  dplyr::summarize(median = median(value),
+            low = quantile(value, 0.1),
+            high = quantile(value, 0.9))
+tgc
+
+gDF <- bdisp %>%
+  left_join(tgc, by='Library')
+
+colors <- paletteer::paletteer_d("ggthemes::Superfishel_Stone", 10)
+p <- ggplot(gDF, aes(x=Lab, y=value)) +
+  geom_ribbon(aes(ymin=low, ymax=high, group=Library), fill='grey') +
+  geom_ribbon(aes(ymin=median, ymax=median, group=Library), fill='red', color='red') +
+  stat_boxplot(geom ='errorbar', width = 0.5) + geom_boxplot(notch=FALSE, outlier.size=0) + 
+  geom_point(size=3, aes(fill=sample, shape=Site), alpha=0.9) +
+  scale_shape_manual(values=c(21,23), guide=NULL) +
+  guides(fill=guide_legend(override.aes=list(shape = c(21,21,21,21,23,23,23,23), size=4))) +
+  facet_grid(. ~ Library) +
+  scale_fill_manual(values=colors) +
+  labs(x='', y='Bray-Curtis Similarity', fill='Sample') +
+  ylim(0,1) +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1),
+        legend.spacing.y = unit(0.01, "cm"))  +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(1.25, "in"), width=unit(1.45, "in"))
+ggsave(p, file='figures/Figure.3a_top.png', dpi=300, height=3, width=7, units='in')
+
+stats <- bdisp %>%
+  group_by(Library) %>%
+  dplyr::summarize(median = median(value),
+                   IQR = IQR(value),
+                   IQR90 = quantile(value, 0.9)-quantile(value, 0.1))
+stats
+
+bdisp.sub <- bdisp[bdisp$Library == 'Seq',]
+model <- aov(value ~ Lab, data=bdisp.sub)
+anova(model)
+res <- emmeans(model, list(pairwise ~ Lab), adjust = "fdr")
+multcomp::cld(res[[1]], adjust='fdr')
+
+bdisp.sub <- bdisp[bdisp$Library == 'PCR/Seq',]
+model <- aov(value ~ Lab, data=bdisp.sub)
+anova(model)
+res <- emmeans(model, list(pairwise ~ Lab), adjust = "fdr")
+multcomp::cld(res[[1]], adjust='fdr')
+
+bdisp.sub <- bdisp[bdisp$Library == 'Ext/PCR/Seq',]
+model <- aov(value ~ Lab, data=bdisp.sub)
+anova(model)
+res <- emmeans(model, list(pairwise ~ Lab), adjust = "fdr")
+multcomp::cld(res[[1]], adjust='fdr')
+
+
+### calculated distance matrix - Morisita
+dist <- vegdist(data, method='morisita')
+
+# convert distance matrix to column format
+dist.mat <- spaa::dist2list(dist)
+dist.mat$value <- 1 - dist.mat$value
+meta <- d[,c('Site', 'Plot', 'Rep', 'Library', 'Code.name')]
+meta$sample <- row.names(meta)
+dist.mat <- dist.mat %>%
+  left_join(meta, by=c('row'='sample'))
+dist.mat <- dist.mat %>%
+  left_join(meta, by=c('col'='sample'))
+
+# select
+dist.mat.sel <- dist.mat[as.numeric(dist.mat$row == dist.mat$col) == 0,]
+dist.mat.sel <- dist.mat.sel[as.numeric(dist.mat.sel$Code.name.x == dist.mat.sel$Code.name.y) == 1,]
+dist.mat.sel <- dist.mat.sel[as.numeric(dist.mat.sel$Library.x == dist.mat.sel$Library.y) == 1,]
+dist.mat.sel <- dist.mat.sel[as.numeric(dist.mat.sel$Site.x == dist.mat.sel$Site.y) == 1,]
+dist.mat.sel <- dist.mat.sel[as.numeric(dist.mat.sel$Plot.x == dist.mat.sel$Plot.y) == 1,]
+
+# create new dataframe with selected data
+bdisp <- dist.mat.sel[,c('Site.x', 'Plot.x', 'Library.x', 'Code.name.x', 'value')]
+names(bdisp) <- c('Site', 'Plot', 'Library', 'Lab', 'value')
+bdisp$sample <- interaction(bdisp$Site, bdisp$Plot)
+bdisp$Library <- factor(bdisp$Library, levels=c('Seq', 'PCR/Seq', 'Ext/PCR/Seq'))
+
+bdisp[bdisp$sample == 'ARDEC.85E','sample'] <- 'ARDEC.Plot1'
+bdisp[bdisp$sample == 'ARDEC.86E','sample'] <- 'ARDEC.Plot2'
+bdisp[bdisp$sample == 'ARDEC.88C','sample'] <- 'ARDEC.Plot3'
+bdisp[bdisp$sample == 'ARDEC.89A','sample'] <- 'ARDEC.Plot4'
+bdisp$sample <- factor(bdisp$sample, levels=c('ARDEC.Plot1', 'ARDEC.Plot2','ARDEC.Plot3','ARDEC.Plot4',
+                                        'Pendleton.Plot1','Pendleton.Plot2','Pendleton.Plot3','Pendleton.Plot4'))
+
+# calculate median, 10th and 95th percentiles for 'good' labs
+bdisp.sub <- bdisp[bdisp$Lab %in% c('Lab1', 'Lab2.b', 'Lab4', 'Lab6'),]
+tgc <- bdisp.sub %>%
+  group_by(Library) %>%
+  dplyr::summarize(median = median(value),
+            low = quantile(value, 0.1),
+            high = quantile(value, 0.9))
+tgc
+
+gDF <- bdisp %>%
+  left_join(tgc, by='Library')
+
+colors <- paletteer::paletteer_d("ggthemes::Superfishel_Stone", 10)
+p <- ggplot(gDF, aes(x=Lab, y=value)) +
+  geom_ribbon(aes(ymin=low, ymax=high, group=Library), fill='grey') +
+  geom_ribbon(aes(ymin=median, ymax=median, group=Library), fill='red', color='red') +
+  stat_boxplot(geom ='errorbar', width = 0.5) + geom_boxplot(notch=FALSE, outlier.size=0) + 
+  geom_point(size=3, aes(fill=sample, shape=Site), alpha=0.9) +
+  scale_shape_manual(values=c(21,23), guide=NULL) +
+  guides(fill=guide_legend(override.aes=list(shape = c(21,21,21,21,23,23,23,23), size=4))) +
+  facet_grid(. ~ Library) +
+  scale_fill_manual(values=colors) +
+  labs(x='', y='Morisita Similarity', fill='Sample') +
+  ylim(0,1) +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1),
+        legend.spacing.y = unit(0.01, "cm"))  +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(1.25, "in"), width=unit(1.45, "in"))
+ggsave(p, file='figures/Figure.3a_bottom.png', dpi=300, height=3, width=7, units='in')
+
+stats <- bdisp %>%
+  group_by(Library) %>%
+  dplyr::summarize(median = median(value),
+                   IQR = IQR(value),
+                   IQR90 = quantile(value, 0.9)-quantile(value, 0.1))
+stats
+
+bdisp.sub <- bdisp[bdisp$Library == 'Seq',]
+model <- aov(value ~ Lab, data=bdisp.sub)
+anova(model)
+res <- emmeans(model, list(pairwise ~ Lab), adjust = "fdr")
+multcomp::cld(res[[1]], adjust='fdr')
+
+bdisp.sub <- bdisp[bdisp$Library == 'PCR/Seq',]
+model <- aov(value ~ Lab, data=bdisp.sub)
+anova(model)
+res <- emmeans(model, list(pairwise ~ Lab), adjust = "fdr")
+multcomp::cld(res[[1]], adjust='fdr')
+
+bdisp.sub <- bdisp[bdisp$Library == 'Ext/PCR/Seq',]
+model <- aov(value ~ Lab, data=bdisp.sub)
+anova(model)
+res <- emmeans(model, list(pairwise ~ Lab), adjust = "fdr")
+multcomp::cld(res[[1]], adjust='fdr')
+```
+
+
+## Figure 3B - Similarities between individual soil samples at each lab (between-lab)
+```{r}
+# import data file
+P.count <- readRDS('P.count.RDS')
+
+# select only soil samples
+P.count <- subset_samples(P.count, Type == 'Soil')
+
+# remove test samples
+P.count <- subset_samples(P.count, QC != 'Test')
+
+
+P.glom <- tax_glom(P.count, taxrank="genus")
+
+# remove taxa with column sums = 0
+P.glom = filter_taxa(P.glom, function(x) sum(x) > 0, TRUE)
+
+# create otu table
+data <- data.frame(t(otu_table(P.glom)))
+
+# Identify treatment variables
+d <- data.frame(sample_data(P.glom))
+d$Site <- factor(d$Site)
+d$Library <- factor(d$Library)
+d$Code.name <- factor(d$Code.name)
+
+### calculated distance matrix - Bray
+dist <- vegdist(decostand(data, 'hellinger'), method='bray', upper=FALSE, diag=FALSE)
+
+# convert distance matrix to column format
+m <- as.matrix(dist)
+dist.mat <- spaa::dist2list(dist)
+dist.mat$value <- 1 - dist.mat$value
+dist.mat
+
+# get meta data and combine with column formatted distance matrix
+meta <- d[,c('Site', 'Plot', 'Rep', 'Library', 'Code.name')]
+meta$int <- interaction(meta$Site, meta$Plot, meta$Rep)
+meta$sample <- row.names(meta)
+dist.mat <- dist.mat %>%
+  left_join(meta, by=c('row'='sample'))
+dist.mat <- dist.mat %>%
+  left_join(meta, by=c('col'='sample'))
+dist.mat
+
+# select only Lab1 & Lab4 comparisons
+dist.mat.sel <- dist.mat[as.numeric(dist.mat$int.x == dist.mat$int.y) == 1,]
+dist.mat.sel <- dist.mat.sel[as.numeric(dist.mat.sel$Code.name.x == dist.mat.sel$Code.name.y) == 0,]
+dist.mat.sel <- dist.mat.sel[as.numeric(dist.mat.sel$Library.x == dist.mat.sel$Library.y) == 1,]
+dist.mat.sel <- dist.mat.sel[dist.mat.sel$Code.name.x %in% c('Lab1', 'Lab4') | dist.mat.sel$Code.name.y %in% c('Lab1', 'Lab4'),]
+
+dist.mat.sel <- dist.mat.sel %>%
+  mutate(ref = case_when(Code.name.x == 'Lab1' & Code.name.y == 'Lab4' ~ 'Lab14',
+                         Code.name.x == 'Lab4' & Code.name.y == 'Lab1' ~ 'Lab14',
+                         Code.name.x == 'Lab1' & Code.name.y != 'Lab4' ~ Code.name.x,
+                         Code.name.x != 'Lab4' & Code.name.y == 'Lab1' ~ Code.name.y,
+                         Code.name.x == 'Lab4' & Code.name.y != 'Lab1' ~ Code.name.x,
+                         Code.name.x != 'Lab1' & Code.name.y == 'Lab4' ~ Code.name.y
+                         ))
+dist.mat.sel <- dist.mat.sel %>%
+  mutate(Lab = case_when(ref == 'Lab1' & Code.name.x == 'Lab1' ~ Code.name.y,
+                         ref == 'Lab1' & Code.name.y == 'Lab1' ~ Code.name.x,
+                         ref == 'Lab4' & Code.name.x == 'Lab4' ~ Code.name.y,
+                         ref == 'Lab4' & Code.name.y == 'Lab4' ~ Code.name.x))
+
+temp <- dist.mat.sel %>%
+  filter(ref == 'Lab14') %>%
+  arrange(value)
+temp1 <- temp
+temp1$Lab <- 'Lab1'
+temp1$ref <- 'Lab4'
+temp2 <- temp
+temp2$Lab <- 'Lab4'
+temp2$ref <- 'Lab1'
+
+dist.mat.sel <- dist.mat.sel %>%
+  filter(ref != 'Lab14')
+dist.mat.sel <- rbind(dist.mat.sel, temp1, temp2)
+
+# create new data.frame wih selected variables
+bdisp <- dist.mat.sel[,c('Site.x', 'Plot.x', 'Library.x', 'Lab', 'ref', 'value')]
+names(bdisp) <- c('Site', 'Plot', 'Library', 'Lab', 'ref', 'value')
+bdisp$sample <- interaction(bdisp$Site, bdisp$Plot)
+bdisp$Library <- factor(bdisp$Library, levels=c('Seq', 'PCR/Seq', 'Ext/PCR/Seq'))
+
+# create new variable combining site and plot
+bdisp[bdisp$sample == 'ARDEC.85E','sample'] <- 'ARDEC.Plot1'
+bdisp[bdisp$sample == 'ARDEC.86E','sample'] <- 'ARDEC.Plot2'
+bdisp[bdisp$sample == 'ARDEC.88C','sample'] <- 'ARDEC.Plot3'
+bdisp[bdisp$sample == 'ARDEC.89A','sample'] <- 'ARDEC.Plot4'
+bdisp$sample <- factor(bdisp$sample, levels=c('ARDEC.Plot1', 'ARDEC.Plot2','ARDEC.Plot3','ARDEC.Plot4',
+                                        'Pendleton.Plot1','Pendleton.Plot2','Pendleton.Plot3','Pendleton.Plot4'))
+
+# calculate median, 10th and 95th percentiles for 'good' labs
+bdisp.sub <- bdisp[bdisp$Lab %in% c('Lab1', 'Lab2.b', 'Lab4', 'Lab6'),]
+tgc <- bdisp.sub %>%
+  group_by(Library) %>%
+  dplyr::summarize(median = median(value),
+            low = quantile(value, 0.1),
+            high = quantile(value, 0.9))
+gDF <- bdisp %>%
+  left_join(tgc, by='Library')
+
+# create graph
+colors <- paletteer::paletteer_d("ggthemes::Superfishel_Stone", 10)
+p <- ggplot(gDF, aes(x=Lab, y=value)) +
+  geom_ribbon(aes(ymin=low, ymax=high, group=Library), fill='grey') +
+  geom_ribbon(aes(ymin=median, ymax=median, group=Library), fill='red', color='red') +
+  stat_boxplot(geom ='errorbar', width = 0.5) + geom_boxplot(notch=FALSE, outlier.size=0) + 
+  geom_point(size=3, aes(fill=sample, shape=Site), alpha=0.9) +
+  scale_shape_manual(values=c(21,23), guide=NULL) +
+  guides(fill=guide_legend(override.aes=list(shape = c(21,21,21,21,23,23,23,23), size=4))) +
+  facet_grid(. ~ Library) +
+  scale_fill_manual(values=colors) +
+  labs(x='', y='Bray-Curtis Similarity', fill='Sample') +
+  ylim(0,1) +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1),
+        legend.spacing.y = unit(0.01, "cm"))  +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(1.25, "in"), width=unit(1.45, "in"))
+ggsave(p, file='figures/Figure.3b_top.png', dpi=300, height=3, width=7, units='in')
+
+stats <- bdisp %>%
+  group_by(Lab, Library) %>%
+  dplyr::summarize(median = median(value),
+                   IQR = IQR(value),
+                   IQR90 = quantile(value, 0.9)-quantile(value, 0.1))
+stats
+
+bdisp.sub <- bdisp[bdisp$Library == 'Seq',]
+model <- aov(value ~ Lab, data=bdisp.sub)
+anova(model)
+res <- emmeans(model, list(pairwise ~ Lab), adjust = "fdr")
+multcomp::cld(res[[1]], adjust='fdr')
+
+bdisp.sub <- bdisp[bdisp$Library == 'PCR/Seq',]
+model <- aov(value ~ Lab, data=bdisp.sub)
+anova(model)
+res <- emmeans(model, list(pairwise ~ Lab), adjust = "fdr")
+multcomp::cld(res[[1]], adjust='fdr')
+
+bdisp.sub <- bdisp[bdisp$Library == 'Ext/PCR/Seq',]
+model <- aov(value ~ Lab, data=bdisp.sub)
+anova(model)
+res <- emmeans(model, list(pairwise ~ Lab), adjust = "fdr")
+multcomp::cld(res[[1]], adjust='fdr')
+
+### calculated distance matrix - Morisita
+dist <- vegdist(data, method='morisita')
+
+# convert distance matrix to column format
+m <- as.matrix(dist)
+dist.mat <- spaa::dist2list(dist)
+dist.mat$value <- 1 - dist.mat$value
+dist.mat
+
+# get meta data and combine with column formatted distance matrix
+meta <- d[,c('Site', 'Plot', 'Rep', 'Library', 'Code.name')]
+meta$int <- interaction(meta$Site, meta$Plot, meta$Rep)
+meta$sample <- row.names(meta)
+dist.mat <- dist.mat %>%
+  left_join(meta, by=c('row'='sample'))
+dist.mat <- dist.mat %>%
+  left_join(meta, by=c('col'='sample'))
+dist.mat
+
+# select only Lab1 & Lab4 comparisons
+dist.mat.sel <- dist.mat[as.numeric(dist.mat$int.x == dist.mat$int.y) == 1,]
+dist.mat.sel <- dist.mat.sel[as.numeric(dist.mat.sel$Code.name.x == dist.mat.sel$Code.name.y) == 0,]
+dist.mat.sel <- dist.mat.sel[as.numeric(dist.mat.sel$Library.x == dist.mat.sel$Library.y) == 1,]
+dist.mat.sel <- dist.mat.sel[dist.mat.sel$Code.name.x %in% c('Lab1', 'Lab4') | dist.mat.sel$Code.name.y %in% c('Lab1', 'Lab4'),]
+
+dist.mat.sel <- dist.mat.sel %>%
+  mutate(ref = case_when(Code.name.x == 'Lab1' & Code.name.y == 'Lab4' ~ 'Lab14',
+                         Code.name.x == 'Lab4' & Code.name.y == 'Lab1' ~ 'Lab14',
+                         Code.name.x == 'Lab1' & Code.name.y != 'Lab4' ~ Code.name.x,
+                         Code.name.x != 'Lab4' & Code.name.y == 'Lab1' ~ Code.name.y,
+                         Code.name.x == 'Lab4' & Code.name.y != 'Lab1' ~ Code.name.x,
+                         Code.name.x != 'Lab1' & Code.name.y == 'Lab4' ~ Code.name.y
+                         ))
+dist.mat.sel <- dist.mat.sel %>%
+  mutate(Lab = case_when(ref == 'Lab1' & Code.name.x == 'Lab1' ~ Code.name.y,
+                         ref == 'Lab1' & Code.name.y == 'Lab1' ~ Code.name.x,
+                         ref == 'Lab4' & Code.name.x == 'Lab4' ~ Code.name.y,
+                         ref == 'Lab4' & Code.name.y == 'Lab4' ~ Code.name.x))
+
+temp <- dist.mat.sel %>%
+  filter(ref == 'Lab14') %>%
+  arrange(value)
+temp1 <- temp
+temp1$Lab <- 'Lab1'
+temp1$ref <- 'Lab4'
+temp2 <- temp
+temp2$Lab <- 'Lab4'
+temp2$ref <- 'Lab1'
+
+dist.mat.sel <- dist.mat.sel %>%
+  filter(ref != 'Lab14')
+dist.mat.sel <- rbind(dist.mat.sel, temp1, temp2)
+
+# create new data.frame wih selected variables
+bdisp <- dist.mat.sel[,c('Site.x', 'Plot.x', 'Library.x', 'Lab', 'ref', 'value')]
+names(bdisp) <- c('Site', 'Plot', 'Library', 'Lab', 'ref', 'value')
+bdisp$sample <- interaction(bdisp$Site, bdisp$Plot)
+bdisp$Library <- factor(bdisp$Library, levels=c('Seq', 'PCR/Seq', 'Ext/PCR/Seq'))
+
+# create new variable combining site and plot
+bdisp[bdisp$sample == 'ARDEC.85E','sample'] <- 'ARDEC.Plot1'
+bdisp[bdisp$sample == 'ARDEC.86E','sample'] <- 'ARDEC.Plot2'
+bdisp[bdisp$sample == 'ARDEC.88C','sample'] <- 'ARDEC.Plot3'
+bdisp[bdisp$sample == 'ARDEC.89A','sample'] <- 'ARDEC.Plot4'
+bdisp$sample <- factor(bdisp$sample, levels=c('ARDEC.Plot1', 'ARDEC.Plot2','ARDEC.Plot3','ARDEC.Plot4',
+                                        'Pendleton.Plot1','Pendleton.Plot2','Pendleton.Plot3','Pendleton.Plot4'))
+
+# calculate median, 10th and 95th percentiles for 'good' labs
+bdisp.sub <- bdisp[bdisp$Lab %in% c('Lab1', 'Lab2.b', 'Lab4', 'Lab6'),]
+tgc <- bdisp.sub %>%
+  group_by(Library) %>%
+  dplyr::summarize(median = median(value),
+            low = quantile(value, 0.1),
+            high = quantile(value, 0.9))
+gDF <- bdisp %>%
+  left_join(tgc, by='Library')
+
+# create graph
+colors <- paletteer::paletteer_d("ggthemes::Superfishel_Stone", 10)
+p <- ggplot(gDF, aes(x=Lab, y=value)) +
+  geom_ribbon(aes(ymin=low, ymax=high, group=Library), fill='grey') +
+  geom_ribbon(aes(ymin=median, ymax=median, group=Library), fill='red', color='red') +
+  stat_boxplot(geom ='errorbar', width = 0.5) + geom_boxplot(notch=FALSE, outlier.size=0) + 
+  geom_point(size=3, aes(fill=sample, shape=Site), alpha=0.9) +
+  scale_shape_manual(values=c(21,23), guide=NULL) +
+  guides(fill=guide_legend(override.aes=list(shape = c(21,21,21,21,23,23,23,23), size=4))) +
+  facet_grid(. ~ Library) +
+  scale_fill_manual(values=colors) +
+  labs(x='', y='Morisita Similarity', fill='Sample') +
+  ylim(0,1) +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1),
+        legend.spacing.y = unit(0.01, "cm"))  +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(1.25, "in"), width=unit(1.45, "in"))
+ggsave(p, file='figures/Figure.3b_bottom.png', dpi=300, height=3, width=7, units='in')
+
+stats <- bdisp %>%
+  group_by(Lab, Library) %>%
+  dplyr::summarize(median = median(value),
+                   IQR = IQR(value),
+                   IQR90 = quantile(value, 0.9)-quantile(value, 0.1))
+stats
+
+bdisp.sub <- bdisp[bdisp$Library == 'Seq',]
+model <- aov(value ~ Lab, data=bdisp.sub)
+anova(model)
+res <- emmeans(model, list(pairwise ~ Lab), adjust = "fdr")
+multcomp::cld(res[[1]], adjust='fdr')
+
+bdisp.sub <- bdisp[bdisp$Library == 'PCR/Seq',]
+model <- aov(value ~ Lab, data=bdisp.sub)
+anova(model)
+res <- emmeans(model, list(pairwise ~ Lab), adjust = "fdr")
+multcomp::cld(res[[1]], adjust='fdr')
+
+bdisp.sub <- bdisp[bdisp$Library == 'Ext/PCR/Seq',]
+model <- aov(value ~ Lab, data=bdisp.sub)
+anova(model)
+res <- emmeans(model, list(pairwise ~ Lab), adjust = "fdr")
+multcomp::cld(res[[1]], adjust='fdr')
+```
+
+
+## Figure 4 - Difeferential Abundance - Compare Sites
+```{r}
+myRank <- 'Phylum'
+# import data file
+P.count <- readRDS('P.count.RDS')
+
+# select only soil samples
+P.count <- subset_samples(P.count, Type == 'Soil')
+
+# remove test samples
+P.count <- subset_samples(P.count, QC != 'Test')
+
+# remove taxa with column sums = 0
+P.count = filter_taxa(P.count, function(x) sum(x) > 0, TRUE)
+
+# fix taxa names
+colnames(tax_table(P.count)) <- c('Kingdom', 'Phylum', 'Class', 'Order', 'Family', 'Genus', 'Species')
+
+# pool by taxonomic level
+P.glom <- tax_glom(P.count, taxrank=myRank)
+tax_table(P.glom)[,myRank] <- taxa_names(P.glom)
+
+### All-self - DESe2 by Lab
+P.lib <- subset_samples(P.glom, Library == 'Ext/PCR/Seq')
+P.lib = filter_taxa(P.lib, function(x) sum(x) > 0, TRUE)
+P.sub <- subset_samples(P.lib, Code.name == 'Lab1')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group = "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm1 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm1$Lab <- 'Lab1'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab2.a')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm2 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm2$Lab <- 'Lab2.a'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab2.b')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm3 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm3$Lab <- 'Lab2.b'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab3')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm4 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm4$Lab <- 'Lab3'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab4')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm5 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm5$Lab <- 'Lab4'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab5')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm6 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm6$Lab <- 'Lab5'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab6')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm7 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm7$Lab <- 'Lab6'
+
+gDF <- rbind(mm1, mm2, mm3, mm4, mm5, mm6, mm7)
+gDF.All_self <- gDF
+
+### gDNA-primary - DESe2 by Lab
+P.lib <- subset_samples(P.glom, Library == 'PCR/Seq')
+P.lib = filter_taxa(P.lib, function(x) sum(x) > 0, TRUE)
+P.sub <- subset_samples(P.lib, Code.name == 'Lab1')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm1 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm1$Lab <- 'Lab1'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab2.a')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm2 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm2$Lab <- 'Lab2.a'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab2.b')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm3 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm3$Lab <- 'Lab2.b'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab4')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm4 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm4$Lab <- 'Lab4'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab5')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm5 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm5$Lab <- 'Lab5'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab6')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm6 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm6$Lab <- 'Lab6'
+
+gDF <- rbind(mm1, mm2, mm3, mm4, mm5, mm6)
+gDF.gDNA_primary <- gDF
+
+### All-primary - DESe2 by Lab
+P.lib <- subset_samples(P.glom, Library == 'Seq')
+P.lib = filter_taxa(P.lib, function(x) sum(x) > 0, TRUE)
+P.sub <- subset_samples(P.lib, Code.name == 'Lab1')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm1 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm1$Lab <- 'Lab1'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab2.a')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm2 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm2$Lab <- 'Lab2.a'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab2.b')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm3 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm3$Lab <- 'Lab2.b'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab4')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm4 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm4$Lab <- 'Lab4'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab5')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm5 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm5$Lab <- 'Lab5'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab6')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm6 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm6$Lab <- 'Lab6'
+
+gDF <- rbind(mm1, mm2, mm3, mm4, mm5, mm6)
+gDF.All_primary <- gDF
+###
+
+# change library names and pool all DESeq2 results
+gDF.All_self$Library <- 'Ext/PCR/Seq'
+gDF.gDNA_primary$Library <- 'PCR/Seq'
+gDF.All_primary$Library <- 'Seq'
+
+final <- rbind(gDF.All_self, gDF.gDNA_primary, gDF.All_primary)
+
+# # calculate averages for taxa ordering
+P.glom <- tax_glom(P.count, taxrank=myRank)
+P.merge <- merge_samples(P.glom, 'Type')
+P.merge <- filter_taxa(P.merge, function(x) sum(x) > 0, TRUE)
+P.rel <- transform_sample_counts(P.merge, function(x) x / sum(x) * 100)
+means <- data.frame(Phylum=as.vector(tax_table(P.rel)[,"Phylum"]),
+                    Class=as.vector(tax_table(P.rel)[,"Class"]),
+                    Order=as.vector(tax_table(P.rel)[,"Order"]),
+                    Family=as.vector(tax_table(P.rel)[,"Family"]),
+                    Genus=as.vector(tax_table(P.rel)[,"Genus"]),
+                    feature=as.vector(taxa_names(P.rel)), 
+                    mean=taxa_sums(P.rel)/nsamples(P.rel))
+
+final <- final %>%
+   left_join(means, by="feature")
+final
+
+# format dataframe
+final$Lab <- as.factor(final$Lab)
+final$padj <- round(final$padj, 3)
+final$Phylum <- fct_reorder(final$Phylum, final$mean, .desc=TRUE)
+
+final <- final %>%
+  mutate(padj = case_when(padj < 0.001 ~ 0.001,
+                          padj >= 0.001 ~ round(padj,3))) %>%
+  mutate(color = case_when(padj < 0.05 ~ 'black',
+                           padj >= 0.001 ~ 'red'))
+
+# fill any missing data with NA
+Phylum <- unique(final$Phylum)
+Lab <- unique(final$Lab)
+Library <- unique(final$Library)
+final <- expand.grid(Phylum=Phylum, Lab=Lab, Library=Library, stringsAsFactors=FALSE) %>%
+  left_join(final, by=c("Phylum", "Lab", "Library"))
+
+# dataframe for coloring
+a <- final %>%
+  group_by(Phylum) %>%
+  mutate(sig = ifelse(padj > 0.05, 0, 1)) %>%
+  dplyr::summarize(count = sum(sig, na.rm=T)) %>%
+  mutate(color = ifelse(count == 5, 'black', 'darkgrey'))
+
+final$Library <- factor(final$Library, levels=c('Seq', 'PCR/Seq', 'Ext/PCR/Seq'))
+final$Lab <- factor(final$Lab, levels=c('Lab6', 'Lab5', 'Lab4', 'Lab3', 'Lab2.b', 'Lab2.a', 'Lab1'))
+p <- ggplot(final, aes(x=Phylum, y=Lab, fill=ef_logFC)) +
+  geom_tile(color='black', size=0.05) +
+  scale_fill_gradient2(na.value = 'grey') +
+  facet_grid(Library ~ .) +
+  geom_text(aes(label=round(ef_logFC, 1), color=color), 
+            angle=0, size=2, fontface='bold') +
+  scale_color_manual(values=c('black', 'darkgrey'), guide='none') +
+  scale_x_discrete(limits = rev(levels(gDF$Lab))) +
+  labs(x='', y='', fill='Log2 FC') +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1),
+        legend.spacing.y = unit(0.01, "cm"))  +
+  theme(text=element_text(size=9,  family="serif"))
+p
+#p <- set_panel_size(p, height=unit(1.25, "in"), width=unit(1.45, "in"))
+ggsave(p, file='figures/Figure.4a.png', dpi=300, height=5, width=7, units='in')
+
+
+# Variability
+MAD <- final %>%
+  filter(Lab != "Lab3")
+
+# get a list of all features present in every lab/library combo
+temp <- MAD %>%
+  dplyr::group_by(feature) %>%
+  dplyr::summarize(n = n()) %>%
+  filter(n == 18)
+
+means <- MAD %>%
+  filter(feature %in% temp$feature) %>%
+  dplyr::group_by(Library, feature) %>%
+  dplyr::summarize(Range = diff(range(ef_logFC, na.rm=T)),
+                   mean = mean(mean, na.rm=T),
+                   n = n())
+
+means$feature <- as.character(means$feature)
+#means <- means %>%
+#  left_join(ranks[,-7], by="feature")
+
+# test if ranges are different
+means$feature <- as.factor(means$feature)
+means$Library <- factor(means$Library, levels=c('Seq', 'PCR/Seq', 'Ext/PCR/Seq'))
+res <- aov(Range ~ Library + Error(feature/Library), data=means)
+summary(res)
+
+emm <- emmeans::emmeans(res, "Library", data=means)
+pairs(emm, adjust='fdr')
+p <- plot(emm, comparisons=TRUE, horizontal=FALSE, adjust='fdr') +
+  labs(x='Log2 FC Variability', y='') +
+  scale_x_continuous(limits=c(0,4)) + 
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=45, hjust=1)) +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(1.5, "in"), width=unit(1.5, "in"))
+ggsave(p, file='figures/Figure.4b_left.png', dpi=300, height=2.5, width=2.5, units='in')
+
+mod_means_contr <- emmeans::emmeans(object = res,
+                                    pairwise ~ "Library",
+                                    adjust = "fdr")
+mod_means <- multcomp::cld(object = mod_means_contr$emmeans,
+                           Letters = letters, decreasing=TRUE,
+                           level = 0.05)
+mod_means
+
+### Class ###
+myRank <- 'Class'
+
+# import data file
+P.count <- readRDS('P.count.RDS')
+
+# select only soil samples
+P.count <- subset_samples(P.count, Type == 'Soil')
+
+# remove test samples
+P.count <- subset_samples(P.count, QC != 'Test')
+
+# remove taxa with column sums = 0
+P.count = filter_taxa(P.count, function(x) sum(x) > 0, TRUE)
+
+# fix taxa names
+colnames(tax_table(P.count)) <- c('Kingdom', 'Phylum', 'Class', 'Order', 'Family', 'Genus', 'Species')
+
+# pool by taxonomic level
+P.glom <- tax_glom(P.count, taxrank=myRank)
+tax_table(P.glom)[,myRank] <- taxa_names(P.glom)
+
+### All-self - DESe2 by Lab
+P.lib <- subset_samples(P.glom, Library == 'Ext/PCR/Seq')
+P.lib = filter_taxa(P.lib, function(x) sum(x) > 0, TRUE)
+P.sub <- subset_samples(P.lib, Code.name == 'Lab1')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group = "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm1 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm1$Lab <- 'Lab1'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab2.a')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm2 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm2$Lab <- 'Lab2.a'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab2.b')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm3 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm3$Lab <- 'Lab2.b'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab3')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm4 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm4$Lab <- 'Lab3'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab4')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm5 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm5$Lab <- 'Lab4'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab5')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm6 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm6$Lab <- 'Lab5'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab6')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm7 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm7$Lab <- 'Lab6'
+
+gDF <- rbind(mm1, mm2, mm3, mm4, mm5, mm6, mm7)
+gDF.All_self <- gDF
+
+### gDNA-primary - DESe2 by Lab
+P.lib <- subset_samples(P.glom, Library == 'PCR/Seq')
+P.lib = filter_taxa(P.lib, function(x) sum(x) > 0, TRUE)
+P.sub <- subset_samples(P.lib, Code.name == 'Lab1')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm1 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm1$Lab <- 'Lab1'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab2.a')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm2 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm2$Lab <- 'Lab2.a'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab2.b')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm3 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm3$Lab <- 'Lab2.b'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab4')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm4 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm4$Lab <- 'Lab4'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab5')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm5 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm5$Lab <- 'Lab5'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab6')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm6 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm6$Lab <- 'Lab6'
+
+gDF <- rbind(mm1, mm2, mm3, mm4, mm5, mm6)
+gDF.gDNA_primary <- gDF
+
+### All-primary - DESe2 by Lab
+P.lib <- subset_samples(P.glom, Library == 'Seq')
+P.lib = filter_taxa(P.lib, function(x) sum(x) > 0, TRUE)
+P.sub <- subset_samples(P.lib, Code.name == 'Lab1')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm1 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm1$Lab <- 'Lab1'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab2.a')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm2 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm2$Lab <- 'Lab2.a'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab2.b')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm3 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm3$Lab <- 'Lab2.b'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab4')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm4 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm4$Lab <- 'Lab4'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab5')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm5 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm5$Lab <- 'Lab5'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab6')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm6 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm6$Lab <- 'Lab6'
+
+gDF <- rbind(mm1, mm2, mm3, mm4, mm5, mm6)
+gDF.All_primary <- gDF
+###
+
+# change library names and pool all DESeq2 results
+gDF.All_self$Library <- 'Ext/PCR/Seq'
+gDF.gDNA_primary$Library <- 'PCR/Seq'
+gDF.All_primary$Library <- 'Seq'
+
+final <- rbind(gDF.All_self, gDF.gDNA_primary, gDF.All_primary)
+
+# # calculate averages for taxa ordering
+P.glom <- tax_glom(P.count, taxrank=myRank)
+P.merge <- merge_samples(P.glom, 'Type')
+P.merge <- filter_taxa(P.merge, function(x) sum(x) > 0, TRUE)
+P.rel <- transform_sample_counts(P.merge, function(x) x / sum(x) * 100)
+means <- data.frame(Phylum=as.vector(tax_table(P.rel)[,"Phylum"]),
+                    Class=as.vector(tax_table(P.rel)[,"Class"]),
+                    Order=as.vector(tax_table(P.rel)[,"Order"]),
+                    Family=as.vector(tax_table(P.rel)[,"Family"]),
+                    Genus=as.vector(tax_table(P.rel)[,"Genus"]),
+                    feature=as.vector(taxa_names(P.rel)), 
+                    mean=taxa_sums(P.rel)/nsamples(P.rel))
+
+final <- final %>%
+   left_join(means, by="feature")
+final
+
+# format dataframe
+final$Lab <- as.factor(final$Lab)
+final$padj <- round(final$padj, 3)
+final$Phylum <- fct_reorder(final$Phylum, final$mean, .desc=TRUE)
+
+final <- final %>%
+  mutate(padj = case_when(padj < 0.001 ~ 0.001,
+                          padj >= 0.001 ~ round(padj,3))) %>%
+  mutate(color = case_when(padj < 0.05 ~ 'black',
+                           padj >= 0.001 ~ 'red'))
+
+# fill any missing data with NA
+Phylum <- unique(final$Phylum)
+Lab <- unique(final$Lab)
+Library <- unique(final$Library)
+final <- expand.grid(Phylum=Phylum, Lab=Lab, Library=Library, stringsAsFactors=FALSE) %>%
+  left_join(final, by=c("Phylum", "Lab", "Library"))
+
+# Variability
+MAD <- final %>%
+  filter(Lab != "Lab3")
+
+# get a list of all features present in every lab/library combo
+temp <- MAD %>%
+  dplyr::group_by(feature) %>%
+  dplyr::summarize(n = n()) %>%
+  filter(n == 18)
+
+means <- MAD %>%
+  filter(feature %in% temp$feature) %>%
+  dplyr::group_by(Library, feature) %>%
+  dplyr::summarize(Range = diff(range(ef_logFC, na.rm=T)),
+                   mean = mean(mean, na.rm=T),
+                   n = n())
+
+means$feature <- as.character(means$feature)
+
+# test if ranges are different
+means$feature <- as.factor(means$feature)
+means$Library <- factor(means$Library, levels=c('Seq', 'PCR/Seq', 'Ext/PCR/Seq'))
+res <- aov(Range ~ Library + Error(feature/Library), data=means)
+summary(res)
+
+emm <- emmeans::emmeans(res, "Library", data=means)
+pairs(emm, adjust='fdr')
+p <- plot(emm, comparisons=TRUE, horizontal=FALSE, adjust='fdr') +
+  labs(x='Log2 FC Variability', y='') +
+  scale_x_continuous(limits=c(0,4)) + 
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=45, hjust=1)) +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(1.5, "in"), width=unit(1.5, "in"))
+ggsave(p, file='figures/Figure.4b_center.png', dpi=300, height=2.5, width=2.5, units='in')
+
+mod_means_contr <- emmeans::emmeans(object = res,
+                                    pairwise ~ "Library",
+                                    adjust = "fdr")
+mod_means <- multcomp::cld(object = mod_means_contr$emmeans,
+                           Letters = letters, decreasing=TRUE,
+                           level = 0.05)
+mod_means
+
+### Genus ###
+myRank <- 'Genus'
+
+# import data file
+P.count <- readRDS('P.count.RDS')
+
+# select only soil samples
+P.count <- subset_samples(P.count, Type == 'Soil')
+
+# remove test samples
+P.count <- subset_samples(P.count, QC != 'Test')
+
+# remove taxa with column sums = 0
+P.count = filter_taxa(P.count, function(x) sum(x) > 0, TRUE)
+
+# fix taxa names
+colnames(tax_table(P.count)) <- c('Kingdom', 'Phylum', 'Class', 'Order', 'Family', 'Genus', 'Species')
+
+# pool by taxonomic level
+P.glom <- tax_glom(P.count, taxrank=myRank)
+tax_table(P.glom)[,myRank] <- taxa_names(P.glom)
+
+### All-self - DESe2 by Lab
+P.lib <- subset_samples(P.glom, Library == 'Ext/PCR/Seq')
+P.lib = filter_taxa(P.lib, function(x) sum(x) > 0, TRUE)
+P.sub <- subset_samples(P.lib, Code.name == 'Lab1')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group = "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm1 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm1$Lab <- 'Lab1'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab2.a')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm2 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm2$Lab <- 'Lab2.a'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab2.b')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm3 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm3$Lab <- 'Lab2.b'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab3')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm4 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm4$Lab <- 'Lab3'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab4')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm5 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm5$Lab <- 'Lab4'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab5')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm6 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm6$Lab <- 'Lab5'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab6')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm7 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm7$Lab <- 'Lab6'
+
+gDF <- rbind(mm1, mm2, mm3, mm4, mm5, mm6, mm7)
+gDF.All_self <- gDF
+
+### gDNA-primary - DESe2 by Lab
+P.lib <- subset_samples(P.glom, Library == 'PCR/Seq')
+P.lib = filter_taxa(P.lib, function(x) sum(x) > 0, TRUE)
+P.sub <- subset_samples(P.lib, Code.name == 'Lab1')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm1 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm1$Lab <- 'Lab1'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab2.a')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm2 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm2$Lab <- 'Lab2.a'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab2.b')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm3 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm3$Lab <- 'Lab2.b'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab4')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm4 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm4$Lab <- 'Lab4'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab5')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm5 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm5$Lab <- 'Lab5'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab6')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm6 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm6$Lab <- 'Lab6'
+
+gDF <- rbind(mm1, mm2, mm3, mm4, mm5, mm6)
+gDF.gDNA_primary <- gDF
+
+### All-primary - DESe2 by Lab
+P.lib <- subset_samples(P.glom, Library == 'Seq')
+P.lib = filter_taxa(P.lib, function(x) sum(x) > 0, TRUE)
+P.sub <- subset_samples(P.lib, Code.name == 'Lab1')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm1 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm1$Lab <- 'Lab1'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab2.a')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm2 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm2$Lab <- 'Lab2.a'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab2.b')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm3 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm3$Lab <- 'Lab2.b'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab4')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm4 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm4$Lab <- 'Lab4'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab5')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm5 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm5$Lab <- 'Lab5'
+
+P.sub <- subset_samples(P.lib, Code.name == 'Lab6')
+out.glom <- microbiomeMarker::run_deseq2(
+  P.sub,
+  group =  "Site",
+  taxa_rank = myRank,
+  norm="RLE",
+  transform="identity",
+  p_adjust='BH',
+  pvalue_cutoff=1
+)
+mm6 <- data.frame(microbiomeMarker::marker_table(out.glom))
+mm6$Lab <- 'Lab6'
+
+gDF <- rbind(mm1, mm2, mm3, mm4, mm5, mm6)
+gDF.All_primary <- gDF
+###
+
+# change library names and pool all DESeq2 results
+gDF.All_self$Library <- 'Ext/PCR/Seq'
+gDF.gDNA_primary$Library <- 'PCR/Seq'
+gDF.All_primary$Library <- 'Seq'
+
+final <- rbind(gDF.All_self, gDF.gDNA_primary, gDF.All_primary)
+
+# # calculate averages for taxa ordering
+P.glom <- tax_glom(P.count, taxrank=myRank)
+P.merge <- merge_samples(P.glom, 'Type')
+P.merge <- filter_taxa(P.merge, function(x) sum(x) > 0, TRUE)
+P.rel <- transform_sample_counts(P.merge, function(x) x / sum(x) * 100)
+means <- data.frame(Phylum=as.vector(tax_table(P.rel)[,"Phylum"]),
+                    Class=as.vector(tax_table(P.rel)[,"Class"]),
+                    Order=as.vector(tax_table(P.rel)[,"Order"]),
+                    Family=as.vector(tax_table(P.rel)[,"Family"]),
+                    Genus=as.vector(tax_table(P.rel)[,"Genus"]),
+                    feature=as.vector(taxa_names(P.rel)), 
+                    mean=taxa_sums(P.rel)/nsamples(P.rel))
+
+final <- final %>%
+   left_join(means, by="feature")
+final
+
+# format dataframe
+final$Lab <- as.factor(final$Lab)
+final$padj <- round(final$padj, 3)
+final$Phylum <- fct_reorder(final$Phylum, final$mean, .desc=TRUE)
+
+final <- final %>%
+  mutate(padj = case_when(padj < 0.001 ~ 0.001,
+                          padj >= 0.001 ~ round(padj,3))) %>%
+  mutate(color = case_when(padj < 0.05 ~ 'black',
+                           padj >= 0.001 ~ 'red'))
+
+# fill any missing data with NA
+Phylum <- unique(final$Phylum)
+Lab <- unique(final$Lab)
+Library <- unique(final$Library)
+final <- expand.grid(Phylum=Phylum, Lab=Lab, Library=Library, stringsAsFactors=FALSE) %>%
+  left_join(final, by=c("Phylum", "Lab", "Library"))
+
+# Variability
+MAD <- final %>%
+  filter(Lab != "Lab3")
+
+# get a list of all features present in every lab/library combo
+temp <- MAD %>%
+  dplyr::group_by(feature) %>%
+  dplyr::summarize(n = n()) %>%
+  filter(n == 18)
+
+means <- MAD %>%
+  filter(feature %in% temp$feature) %>%
+  dplyr::group_by(Library, feature) %>%
+  dplyr::summarize(Range = diff(range(ef_logFC, na.rm=T)),
+                   mean = mean(mean, na.rm=T),
+                   n = n())
+
+means$feature <- as.character(means$feature)
+
+# test if ranges are different
+means$feature <- as.factor(means$feature)
+means$Library <- factor(means$Library, levels=c('Seq', 'PCR/Seq', 'Ext/PCR/Seq'))
+res <- aov(Range ~ Library + Error(feature/Library), data=means)
+summary(res)
+
+emm <- emmeans::emmeans(res, "Library", data=means)
+pairs(emm, adjust='fdr')
+p <- plot(emm, comparisons=TRUE, horizontal=FALSE, adjust='fdr') +
+  labs(x='Log2 FC Variability', y='') +
+  scale_x_continuous(limits=c(0,4)) + 
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=45, hjust=1)) +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(1.5, "in"), width=unit(1.5, "in"))
+ggsave(p, file='figures/Figure.4b_right.png', dpi=300, height=2.5, width=2.5, units='in')
+
+mod_means_contr <- emmeans::emmeans(object = res,
+                                    pairwise ~ "Library",
+                                    adjust = "fdr")
+mod_means <- multcomp::cld(object = mod_means_contr$emmeans,
+                           Letters = letters, decreasing=TRUE,
+                           level = 0.05)
+mod_means
+
+```
+
+
+# Extended Data Figure 1 - Zymo Genus Relative Abundances
+```{r}
+# Import phyloseq object with final sequencing data
+P.count <- readRDS('P.count.RDS')
+
+# Convert to relative abundances
+P.rel <- transform_sample_counts(P.count, function(x) x / sum(x))
+
+# Select Zymo MOCK only
+P.zymos <- subset_samples(P.rel, Type == 'Zymo')
+
+# Remove blank taxa (sum = 0)
+P.zymos = filter_taxa(P.zymos, function(x) sum(x) > 0, TRUE)
+
+# Pool at the genus level
+P.glom <- tax_glom(P.zymos, taxrank='genus')
+
+# replace non-Zymo genera with 'other' and re-pool at genus level
+val_repl <- c("Bacillus", "Enterococcus", "Escherichia", "Limosilactobacillus", 
+              "Listeria", "Pseudomonas", "Salmonella", "Staphylococcus")
+col_repl <- c("superkingdom", "phylum", "class", "order", "family", "genus")
+tax_table(P.glom)[,col_repl] <- sapply(tax_table(P.glom)[,col_repl], 
+                                       function(x) replace(x, !(x %in% val_repl), "Other"))
+P.glom <- tax_glom(P.glom, taxrank='genus')
+
+# get dist matrix
+data <- t(otu_table(P.glom))
+class(data) <- 'matrix'
+dist <- vegdist(data, method='bray')
+
+# convert dist matrix to similarities and save in 2-column format
+sim <- 1-dist
+sim.col <- spaa::dist2list(sim)
+meta <- sample_data(P.glom)
+meta$sample <- row.names(meta)
+sim.col <- sim.col %>%
+  left_join(meta[,c('sample', 'Library')], by=c('row'='sample')) %>%
+  mutate(row.Library = Library) %>%
+  select(-Library) %>%
+  left_join(meta[,c('sample', 'Library')], by=c('col'='sample')) %>%
+  mutate(col.Library = Library) %>%
+  select(-Library)
+sim.col
+
+# extract all data from phyloseq object
+d <- psmelt(P.glom)
+
+# calculate means by Lab, Library, and genus
+means <- d %>%
+  dplyr::group_by(Code.name, Library, genus) %>%
+  dplyr::summarize(mean = mean(Abundance, na.r=T)) 
+
+# convert to wide format and save data
+means.wide <- tidyr::spread(means, key=genus, value=mean)
+means.wide
+
+# convert selected columns to factors and define ordering
+d$Library <- factor(d$Library, levels=c('Seq', 'PCR/Seq', 'Ext/PCR/Seq'))
+d$genus <- factor(d$genus, levels=c("Other", "Bacillus", "Enterococcus", "Escherichia",
+                                    "Limosilactobacillus", "Listeria", "Pseudomonas", 
+                                    "Salmonella", "Staphylococcus"))
+
+# create new graphing data-frame with expected Zymo relative abundances
+gDF <- d[d$Library == 'Ext/PCR/Seq', c('Code.name', 'genus', 'Abundance')]
+expected <- data.frame(Code.name='Expected', 
+                       genus=c("Other", "Bacillus", "Enterococcus", "Escherichia",
+                               "Limosilactobacillus", "Listeria", "Pseudomonas", 
+                               "Salmonella", "Staphylococcus"), 
+                       Abundance=c(0, 0.174, 0.099, 0.101, 0.184, 0.141, 0.042, 0.104, 0.155))
+gDF <- rbind(gDF, expected)
+
+
+colors <- c(paletteer::paletteer_d("ggthemes::Superfishel_Stone", 10))
+p <- ggplot(gDF, aes(x=Code.name, y=Abundance, fill=genus) ) +
+  geom_bar(position='stack', stat='summary', fun='mean') +
+  theme(strip.text.x=element_text(size=10, colour='blue', angle=0)) + 
+  theme(strip.text.y=element_text(size=10, colour='blue', angle=90)) + 
+  scale_fill_manual(values=colors,
+                    labels=c("Other", "*Bacillus*", "*Enterococcus*",
+                             "*Escherichia*", "*Limosilactobacillus*", 
+                             "*Listeria*", "*Pseudomonas*", 
+                             "*Salmonella*", "*Staphylococcus*")) +
+  labs(x='', y='Relative Abundance', fill='') +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1),
+        legend.text = element_markdown()) +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(3, "in"), width=unit(3, "in"))
+ggsave(p, file='figures/Ext_Data_Figure.1.png', dpi=300, height=4, width=5, units='in')
+```
+
+
+## Extended Data Figure 2 - BC PCoA
+```{r}
+# import data file
+P.count <- readRDS('P.count.RDS')
+
+# select only soil samples
+P.count <- subset_samples(P.count, Type == 'Soil')
+
+# remove test samples
+P.count <- subset_samples(P.count, QC != 'Test')
+
+# pool by taxa level
+P.glom <- tax_glom(P.count, taxrank="genus")
+
+# remove taxa with column sums = 0
+P.glom = filter_taxa(P.glom, function(x) sum(x) > 0, TRUE)
+
+# create DNA phyla data matrix and view summary
+data <- data.frame(t(otu_table(P.glom)))
+
+# Identify treatment variables
+d <- data.frame(sample_data(P.glom))
+d$Site <- factor(d$Site)
+d$Library <- factor(d$Library)
+d$Code.name <- factor(d$Code.name)
+
+# Create distance matrix from PLFA data
+dist <- vegdist(decostand(data, 'hellinger'), method='bray')
+
+# run capscale/dbRDA for different treatment groups
+ord <- capscale(dist ~ 1, data=d)
+
+# variance partition
+mod <- varpart(dist, 
+               ~ Site,
+               ~ Library,
+               ~ Code.name,
+               data=d)
+showvarparts(3)
+plot(mod, cutoff = 0, cex = 0.7, bg=2:4, Xnames=c('Site', 'Library', 'Lab'), digits=2)
+
+# perMANOVA test
+adonis2(dist ~ Site + Library + Code.name, data=d, perm=999)
+
+# pairwise adonis
+d.sel <- d[d$Library=='Seq',]
+wanted <- row.names(d.sel)
+mat <- as.matrix(dist)
+dist.sel <- mat[wanted,wanted]
+pairwiseAdonis::pairwise.adonis2(dist.sel ~ Code.name, data=d.sel)
+
+d.sel <- d[d$Library=='PCR/Seq',]
+wanted <- row.names(d.sel)
+mat <- as.matrix(dist)
+dist.sel <- mat[wanted,wanted]
+pairwiseAdonis::pairwise.adonis2(dist.sel ~ Code.name, data=d.sel)
+
+d.sel <- d[d$Library=='Ext/PCR/Seq',]
+wanted <- row.names(d.sel)
+mat <- as.matrix(dist)
+dist.sel <- mat[wanted,wanted]
+pairwiseAdonis::pairwise.adonis2(dist.sel ~ Code.name, data=d.sel)
+
+### get eigenvalues and proportion explained
+ev <- eigenvals(ord)
+Axis1_exp = round(ev[1] / sum(ev) * 100, 1)
+Axis2_exp = round(ev[2] / sum(ev) * 100, 1)
+
+### get PC axes
+axes <- as.data.frame(scores(ord, display="sites", choices=c(1:2)))
+names(axes) <- c("Axis1", "Axis2")
+axes <- cbind(d, axes)
+axes$Library <- factor(axes$Library, levels=c('Seq', 'PCR/Seq', 'Ext/PCR/Seq'))
+axes$Site <- factor(axes$Site, levels=c('ARDEC', 'Pendleton'))
+
+# make graph
+axes$sample <- as.character(interaction(axes$Site, axes$Plot))
+axes[axes$sample == 'ARDEC.85E','sample'] <- 'ARDEC.Plot1'
+axes[axes$sample == 'ARDEC.86E','sample'] <- 'ARDEC.Plot2'
+axes[axes$sample == 'ARDEC.88C','sample'] <- 'ARDEC.Plot3'
+axes[axes$sample == 'ARDEC.89A','sample'] <- 'ARDEC.Plot4'
+axes$sample <- factor(axes$sample, levels=c('ARDEC.Plot1', 'ARDEC.Plot2','ARDEC.Plot3','ARDEC.Plot4',
+                                            'Pendleton.Plot1','Pendleton.Plot2','Pendleton.Plot3','Pendleton.Plot4'))
+
+axes$interaction <- interaction(axes$Site, axes$Library, axes$Code.name)
+colors <- paletteer::paletteer_d("ggthemes::Superfishel_Stone", 10)
+p <- ggplot(data=axes, aes(x=Axis1, y=Axis2, fill=Code.name, shape=Site), color='black') +
+  geom_point(size=4) +
+  facet_grid(. ~ Library, scales='free', space='free') +
+  scale_fill_manual(values=colors) +
+  scale_shape_manual(values=c(21,22,23,24), name='Site') +
+  guides(fill = guide_legend(
+    override.aes=list(shape = rep(21, 7)))) +
+  stat_ellipse(aes(color=interaction), lwd=0.7, color='grey30') +
+  labs(x=paste0('MDS1 (', Axis1_exp, '%)'), 
+       y=paste0('MDS2 (', Axis2_exp, '%)'),
+       fill='Lab', color='Lab') +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1),
+        legend.spacing.y = unit(0.01, "cm"))  +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(1.5, "in"), width=unit(1.75, "in"))
+ggsave(p, file='figures/Ext_Data_Figure.2a.png', dpi=300, height=3, width=7, units='in')
+
+p <- ggplot(data=axes, aes(x=Reads_ftc, y=Axis1, fill=Code.name, shape=Site), color='black') +
+  geom_point(size=4) +
+  facet_grid(. ~ Library, scales='fixed', space='free') +
+  scale_fill_manual(values=colors) +
+  scale_shape_manual(values=c(21,22,23), name='Site')+
+  guides(fill = guide_legend(
+    override.aes=list(shape = rep(21, 7)))) +
+  labs(x='Sequence Reads', 
+       y=paste0('MDS1 (', Axis1_exp, '%)'),
+       fill='Lab') +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1),
+        legend.spacing.y = unit(0.01, "cm"))  +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(1.5, "in"), width=unit(1.75, "in"))
+ggsave(p, file='figures/Ext_Data_Figure.2b_top.png', dpi=300, height=3, width=7, units='in')
+
+p <- ggplot(data=axes, aes(x=Reads_ftc, y=Axis2, fill=Code.name, shape=Site), color='black') +
+  geom_point(size=4) +
+  facet_grid(. ~ Library, scales='fixed', space='free') +
+  scale_fill_manual(values=colors) +
+  scale_shape_manual(values=c(21,22,23), name='Site')+
+  guides(fill = guide_legend(
+    override.aes=list(shape = rep(21, 7)))) +
+  labs(x='Sequence Reads', 
+       y=paste0('MDS2 (', Axis2_exp, '%)'),
+       fill='Lab') +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1),
+        legend.spacing.y = unit(0.01, "cm"))  +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(1.5, "in"), width=unit(1.75, "in"))
+ggsave(p, file='figures/Ext_Data_Figure.2b_bottom.png', dpi=300, height=3, width=7, units='in')
+
+```
+
+
+## Extended Data Figure 3 - Morisita PCoA
+```{r}
+# import data file
+P.count <- readRDS('P.count.RDS')
+
+# select only soil samples
+P.count <- subset_samples(P.count, Type == 'Soil')
+
+# remove test samples
+P.count <- subset_samples(P.count, QC != 'Test')
+
+# pool by taxa level
+P.glom <- tax_glom(P.count, taxrank="genus")
+
+# remove taxa with column sums = 0
+P.glom = filter_taxa(P.glom, function(x) sum(x) > 0, TRUE)
+
+# create DNA phyla data matrix and view summary
+data <- data.frame(t(otu_table(P.glom)))
+
+# Identify treatment variables
+d <- data.frame(sample_data(P.glom))
+d$Site <- factor(d$Site)
+d$Library <- factor(d$Library)
+d$Code.name <- factor(d$Code.name)
+
+# Create distance matrix from PLFA data
+dist <- vegdist(data, method='morisita')
+
+# run capscale/dbRDA for different treatment groups
+ord <- capscale(dist ~ 1, data=d)
+
+# variance partition
+mod <- varpart(dist, 
+               ~ Site,
+               ~ Library,
+               ~ Code.name,
+               data=d)
+showvarparts(3)
+plot(mod, cutoff = 0, cex = 0.7, bg=2:4, Xnames=c('Site', 'Library', 'Lab'), digits=2)
+
+# perMANOVA test
+adonis2(dist ~ Site + Library + Code.name, data=d, perm=999)
+
+# pairwise adonis
+d.sel <- d[d$Library=='Seq',]
+wanted <- row.names(d.sel)
+mat <- as.matrix(dist)
+dist.sel <- mat[wanted,wanted]
+pairwiseAdonis::pairwise.adonis2(dist.sel ~ Code.name, data=d.sel)
+
+d.sel <- d[d$Library=='PCR/Seq',]
+wanted <- row.names(d.sel)
+mat <- as.matrix(dist)
+dist.sel <- mat[wanted,wanted]
+pairwiseAdonis::pairwise.adonis2(dist.sel ~ Code.name, data=d.sel)
+
+d.sel <- d[d$Library=='Ext/PCR/Seq',]
+wanted <- row.names(d.sel)
+mat <- as.matrix(dist)
+dist.sel <- mat[wanted,wanted]
+pairwiseAdonis::pairwise.adonis2(dist.sel ~ Code.name, data=d.sel)
+
+### get eigenvalues and proportion explained
+ev <- eigenvals(ord)
+Axis1_exp = round(ev[1] / sum(ev) * 100, 1)
+Axis2_exp = round(ev[2] / sum(ev) * 100, 1)
+
+### get PC axes
+axes <- as.data.frame(scores(ord, display="sites", choices=c(1:2)))
+names(axes) <- c("Axis1", "Axis2")
+axes <- cbind(d, axes)
+axes$Library <- factor(axes$Library, levels=c('Seq', 'PCR/Seq', 'Ext/PCR/Seq'))
+axes$Site <- factor(axes$Site, levels=c('ARDEC', 'Pendleton'))
+
+# make graph
+axes$sample <- as.character(interaction(axes$Site, axes$Plot))
+axes[axes$sample == 'ARDEC.85E','sample'] <- 'ARDEC.Plot1'
+axes[axes$sample == 'ARDEC.86E','sample'] <- 'ARDEC.Plot2'
+axes[axes$sample == 'ARDEC.88C','sample'] <- 'ARDEC.Plot3'
+axes[axes$sample == 'ARDEC.89A','sample'] <- 'ARDEC.Plot4'
+axes$sample <- factor(axes$sample, levels=c('ARDEC.Plot1', 'ARDEC.Plot2','ARDEC.Plot3','ARDEC.Plot4',
+                                            'Pendleton.Plot1','Pendleton.Plot2','Pendleton.Plot3','Pendleton.Plot4'))
+
+axes$interaction <- interaction(axes$Site, axes$Library, axes$Code.name)
+colors <- paletteer::paletteer_d("ggthemes::Superfishel_Stone", 10)
+p <- ggplot(data=axes, aes(x=Axis1, y=Axis2, fill=Code.name, shape=Site), color='black') +
+  geom_point(size=4) +
+  facet_grid(. ~ Library, scales='free', space='free') +
+  scale_fill_manual(values=colors) +
+  scale_shape_manual(values=c(21,22,23,24), name='Site') +
+  guides(fill = guide_legend(
+    override.aes=list(shape = rep(21, 7)))) +
+  stat_ellipse(aes(color=interaction), lwd=0.7, color='grey30') +
+  labs(x=paste0('MDS1 (', Axis1_exp, '%)'), 
+       y=paste0('MDS2 (', Axis2_exp, '%)'),
+       fill='Lab', color='Lab') +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1),
+        legend.spacing.y = unit(0.01, "cm"))  +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(1.5, "in"), width=unit(1.75, "in"))
+ggsave(p, file='figures/Ext_Data_Figure.3a.png', dpi=300, height=3, width=7, units='in')
+
+p <- ggplot(data=axes, aes(x=Reads_ftc, y=Axis1, fill=Code.name, shape=Site), color='black') +
+  geom_point(size=4) +
+  facet_grid(. ~ Library, scales='fixed', space='free') +
+  scale_fill_manual(values=colors) +
+  scale_shape_manual(values=c(21,22,23), name='Site')+
+  guides(fill = guide_legend(
+    override.aes=list(shape = rep(21, 7)))) +
+  labs(x='Sequence Reads', 
+       y=paste0('MDS1 (', Axis1_exp, '%)'),
+       fill='Lab') +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1),
+        legend.spacing.y = unit(0.01, "cm"))  +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(1.5, "in"), width=unit(1.75, "in"))
+ggsave(p, file='figures/Ext_Data_Figure.3b_top.png', dpi=300, height=3, width=7, units='in')
+
+p <- ggplot(data=axes, aes(x=Reads_ftc, y=Axis2, fill=Code.name, shape=Site), color='black') +
+  geom_point(size=4) +
+  facet_grid(. ~ Library, scales='fixed', space='free') +
+  scale_fill_manual(values=colors) +
+  scale_shape_manual(values=c(21,22,23), name='Site')+
+  guides(fill = guide_legend(
+    override.aes=list(shape = rep(21, 7)))) +
+  labs(x='Sequence Reads', 
+       y=paste0('MDS2 (', Axis2_exp, '%)'),
+       fill='Lab') +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1),
+        legend.spacing.y = unit(0.01, "cm"))  +
+  theme(text=element_text(size=9,  family="serif"))
+p
+p <- set_panel_size(p, height=unit(1.5, "in"), width=unit(1.75, "in"))
+ggsave(p, file='figures/Ext_Data_Figure.3b_bottom.png', dpi=300, height=3, width=7, units='in')
+
+```
+
+
+## Figure XX - Rarefaction Curves (not used)
+```{r}
+# import phyloseq object created above
+P.count <- readRDS('P.count.RDS')
+P.count <- subset_samples(P.count, QC != 'Test')
+
+# select soil samples only
+P.soils <- subset_samples(P.count, Type == 'Soil')
+
+P.sub <- subset_samples(P.soils, Library=='Ext/PCR/Seq')
+P.sub.sub <- subset_samples(P.sub, Site=='ARDEC')
+p <- MiscMetabar::accu_plot(P.sub.sub, fact='Code.name', add_nb_seq = TRUE, by.fact = TRUE)
+
+
+
+set.seed(42)
+calculate_rarefaction_curves <- function(psdata, measures, depths) {
+  require('plyr') # ldply
+  require('reshape2') # melt
+
+  estimate_rarified_richness <- function(psdata, measures, depth) {
+    if(max(sample_sums(psdata)) < depth) return()
+    psdata <- prune_samples(sample_sums(psdata) >= depth, psdata)
+
+    rarified_psdata <- rarefy_even_depth(psdata, depth, verbose = FALSE)
+
+    alpha_diversity <- estimate_richness(rarified_psdata, measures = measures)
+
+    # as.matrix forces the use of melt.array, which includes the Sample names (rownames)
+    molten_alpha_diversity <- melt(as.matrix(alpha_diversity), 
+                                   varnames = c('Sample', 'Measure'), value.name = 'Alpha_diversity')
+
+    molten_alpha_diversity
+  }
+
+  names(depths) <- depths # this enables automatic addition of the Depth to the output by ldply
+  rarefaction_curve_data <- ldply(depths, estimate_rarified_richness, 
+                                  psdata = psdata, measures = measures, .id = 'Depth', 
+                                  .progress = ifelse(interactive(), 'text', 'none'))
+
+  # convert Depth from factor to numeric
+  rarefaction_curve_data$Depth <- as.numeric(levels(rarefaction_curve_data$Depth))[rarefaction_curve_data$Depth]
+
+  rarefaction_curve_data
+}
+
+rarefaction_curve_data <- calculate_rarefaction_curves(P.soils, c('Observed'), 
+                                                       rep(c(1, 10, 100, 1000, 1:20 * 5000), each = 10))
+summary(rarefaction_curve_data)
+
+rarefaction_curve_data_summary <- ddply(rarefaction_curve_data, c('Depth', 'Sample', 'Measure'), summarise, 
+                                        Alpha_diversity_mean = mean(Alpha_diversity), 
+                                        Alpha_diversity_sd = sd(Alpha_diversity))
+rarefaction_curve_data_summary_verbose <- merge(rarefaction_curve_data_summary, 
+                                                data.frame(sample_data(P.soils)), 
+                                                by.x = 'Sample', by.y = 'row.names')
+
+saveRDS(rarefaction_curve_data_summary_verbose, 'rarefaction.RDS')
+
+rarefaction_curve_data_summary_verbose <- readRDS('rarefaction.RDS')
+rarefaction_curve_data_summary_verbose$Library <- factor(rarefaction_curve_data_summary_verbose$Library, 
+                                                         levels=c('Seq', 'PCR/Seq', 'Ext/PCR/Seq'))
+
+means <- rarefaction_curve_data_summary_verbose %>%
+  group_by(Library, Code.name, Site, Depth) %>%
+  summarize(mean = mean(Alpha_diversity_mean, na.rm=T),
+            sd = sd(Alpha_diversity_mean, na.rm=T))
+
+p <- ggplot(means, aes(x = Depth,
+                       y = mean,
+                       ymin = mean - sd,
+                       ymax = mean + sd,
+                       color=Site)) + 
+  geom_line() + xlim(c(0,15000)) + 
+  geom_pointrange(size=0.25) + 
+  facet_grid(Library ~ Code.name) +
+  theme_bw() + 
+  theme(axis.text.x=element_text(angle=90, vjust=0.5, hjust=1)) +
+  labs(x='Sampling Depth', y='Species Richness')
+p
+ggsave(p, file='figures/Rarefaction.pdf', height=6, width=8)
+
+```
+
+
+
+
+
+
+

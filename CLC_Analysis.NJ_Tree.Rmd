@@ -1,0 +1,72 @@
+---
+title: "Phlip Distance Matrix Generation"
+subtitle: | 
+  Manter et al. 2024. Unveiling hidden errors in soil microbial community sequencing:
+    A case for reference soils and improved diagnostics. Nature Methods"
+
+author: Daniel Manter
+affiliation: USDA-ARS
+email: daniel.manter@usda.gov
+
+date: "`r format(Sys.time(), '%m/%d/%y')`"
+output: bookdown::html_document2
+---
+
+
+## Project Description
+This analysis is for the USDA-ARS Cross-laboratory Comparison (CLC) Project. Soil samples from two sites (ARDEC and Pendleton) were sequenced using the Oxford Nanopore minION in different laboratories. Code provided is for generating a phylip distance matrix for the EMU reference database.
+
+
+## Required programs:
+-   [mothur](https://github.com/mothur/mothur)
+-   [EMU](https://gitlab.com/treangenlab/emu)
+
+
+## Project directory structure (\*denotes a required input file/folder)
+```
+        +-- proj_dir*
+        |   +-- CLC_Analysis.NJ_Tree.Rmd*     <-- (this file)
+        |   +-- silva.seed_v138.align*        <-- silva alignment from mothur
+        |   +-- species_taxid.fasta*          <-- 16S rRNA ref database from EMU
+```
+
+
+## Mothur commands
+```{bash}
+# align sequences to silva.seed_v138.align
+mothur "#align.seqs(fasta=species_taxid.fasta, reference=silva.seed_v138.align)"
+
+# filter out emply columns in alignment
+mothur "#filter.seqs(fasta=species_taxid.align, vertical=T)"
+
+# create distance matrix
+mothur "#unique.seqs(fasta=species_taxid.filter.fasta)"
+mothur "#screen.seqs(fasta=species_taxid.filter.unique.fasta, name=species_taxid.filter.names, start=118, end=4676, maxambig=6, maxhomop=8)"
+mothur "#dist.seqs(fasta=species_taxid.filter.unique.good.fasta, cutoff=0.03, calc=onegap, countends=F)"
+
+# get rep sequence for each taxid
+mothur "#list.seqs(fasta=species_taxid.filter.unique.good.fasta)"
+mothur "#list.seqs(species_taxid.filter.unique.good.fasta)"
+mothur "#cluter(column=species_taxid.filter.unique.good.dist, name=species_taxid.filter.good.names, method=unique)"
+mothur "#get.oturep(column=species_taxid.filter.unique.good.dist, list=species_taxid.filter.good.unique.list, fasta=species_taxid.filter.unique.good.fasta, name=species_taxid.filter.good.names)"
+
+# create final phylip-formatted distance matrix
+mothur "#dist.seqs(fasta=taxid.good.taxid.rep.fasta, output=lt)"
+```
+
+
+## R commands
+```{r}
+library(fastreeR)
+library(phyloseq)
+library(usedist)
+
+# import phylip distance matrix and change names
+d <- phyloseq::import_mothur_dist('taxid.good.taxid.rep.phylip.dist')
+
+# simplify names to taxid's only
+d <- usedist::dist_setNames(d, sub("_.*", "", names(d)))
+
+# save distance matrix for use in CLC_Analysis.MS.RMD
+saveRDS(d, "EMU.phylip.dist.RDS")
+```
