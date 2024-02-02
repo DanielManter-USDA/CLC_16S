@@ -1,7 +1,7 @@
 ---
 title: "Data Analysis & Figure Generation"
 subtitle:    | 
-    | "Manter et al. 2024. Unveiling hidden errors in soil microbial community sequencing: 
+    | "Manter et al. 2024. Unveiling errors in soil microbial community sequencing: 
     | A case for reference soils and improved diagnostics. Nature Methods"
 
 author: Daniel Manter
